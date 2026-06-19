@@ -543,8 +543,7 @@ textarea.paste-area:focus { border-color: var(--accent); background: var(--surfa
 // ══════════════════════════════════════════════════
 // ESTADO GLOBAL
 // ══════════════════════════════════════════════════
-// ── URL DO APPS SCRIPT ──────────────────────────────────────────
-// ⚙️  CONFIGURE AQUI: cole sua URL do Apps Script abaixo (entre as aspas).
+// ── CONEXÃO SUPABASE ────────────────────────────────────────────
 // ⚙️  CONFIGURE AQUI: URL e chave anon do seu projeto Supabase.
 // Acesse app.supabase.com → seu projeto → Settings → API
 const SUPABASE_URL      = 'https://sukffmzytirwbtrrzxlx.supabase.co';
@@ -696,7 +695,6 @@ async function enviarInteresse(){
   statEl.style.display = 'block';
   statEl.textContent = 'Enviando solicitação…';
 
-  S.scriptUrl = urlParaUsar;
   try {
     await api('registrarInteresse', {
       nome, email, cpf_cnpj, telefone,
@@ -997,15 +995,20 @@ async function api(action, payload={}, opts={}){
     }
 
     case 'registrarInteresse': {
-      const r = await sb.from('interesses').insert({ ...payload, status:'pendente' });
+      // Remove campos que não existem como coluna (ex.: ts)
+      const { ts, ...campos } = payload;
+      const r = await sb.from('interesses').insert({ ...campos, status:'pendente' });
       if(r.error) throw new Error(r.error.message);
       return { ok:true };
     }
 
     case 'ativarInteressado': {
-      const { id, nome, password, regime, ramo } = payload;
+      const { id, email, nome, password, regime, ramo } = payload;
       const slug = toSlug(nome);
-      await sb.from('interesses').update({ status:'ativado' }).eq('id', id);
+      // Marca o lead como ativado (por id, ou por email/nome quando o id não vem)
+      if(id)         await sb.from('interesses').update({ status:'ativado' }).eq('id', id);
+      else if(email) await sb.from('interesses').update({ status:'ativado' }).eq('email', email);
+      else           await sb.from('interesses').update({ status:'ativado' }).eq('nome', nome);
       await sb.from('clientes').upsert({ nome, regime:regime||'simples_servicos', ramo:ramo||'servicos' },{onConflict:'nome'});
       const rU = await sb.from('usuarios').upsert({
         username:slug, senha:password||'analizza123', role:'cliente',
@@ -1133,16 +1136,6 @@ async function doLogin(){
  
   if(!user || !pass){ showError('Preencha usuário e senha.'); return; }
  
-  // URL do script: usa a que está no S (carregada do localStorage na inicialização)
-  // Ou tenta buscar do localStorage diretamente
-  const savedUrl = S.scriptUrl || localStorage.getItem('analizza_script_url') || '';
-  if(!savedUrl){
-    // Mostra campo para o usuário colar a URL (só acontece na primeira vez em novo browser)
-    showError('URL do servidor não configurada. Se você é o contador, cole a URL em Configurações após entrar com admin/analizza2025. Se você é cliente, peça ao seu contador o link correto do app.');
-    return;
-  }
-  S.scriptUrl = savedUrl;
- 
   // Captura o botão pelo ID para não pegar o botão errado
   const btn = document.getElementById('login-btn');
   const statusEl = document.getElementById('login-status');
@@ -1172,7 +1165,6 @@ async function doLogin(){
       S.ramo       = data.ramo || 'servicos';
     }
  
-    localStorage.setItem('analizza_script_url', S.scriptUrl);
     // Salva sessão por 7 dias (evita login a cada F5)
     localStorage.setItem('analizza_session', JSON.stringify({
       role: data.role, username: data.username,
@@ -1221,7 +1213,6 @@ function activarDemo(){
   S.username   = 'demo';
   S.clientName = 'Studio Criativo Demo';
   S.ramo       = 'servicos';
-  // NÃO zera S.scriptUrl — preserva configuração para quando o usuário sair do demo
  
   const txDemo = [
     // ── RECEITAS ──
@@ -4455,14 +4446,20 @@ async function renderUsers(){
   }
 }
  
-function saveGeminiKey(){
+async function saveGeminiKey(){
   const k   = document.getElementById('gemini-key-field')?.value?.trim();
   const msg = document.getElementById('gemini-key-msg');
   if(!k){ msg.style.display='block'; msg.style.color='var(--danger)'; msg.textContent='Cole a chave primeiro.'; return; }
+  // Salva local (este navegador) e no banco (para todos os clientes herdarem)
   localStorage.setItem('analizza_gemini_key', k);
-  S.apiKey = k;
-  msg.style.display='block'; msg.style.color='var(--success)'; msg.textContent='✓ Chave Gemini salva!';
-  setTimeout(()=>msg.style.display='none', 2000);
+  S._geminiKey = k;
+  try {
+    await api('setGeminiKey', { key: k });
+    msg.style.display='block'; msg.style.color='var(--success)'; msg.textContent='✓ Chave Gemini salva para todos os clientes!';
+  } catch(e) {
+    msg.style.display='block'; msg.style.color='var(--success)'; msg.textContent='✓ Chave salva neste dispositivo (falha ao gravar no banco: '+e.message+').';
+  }
+  setTimeout(()=>msg.style.display='none', 3000);
 }
 
 async function testarConexaoSupabase(){
@@ -4707,7 +4704,7 @@ function _restaurarBadgeSidebar(){
  
 // Carrega badge de interessados silenciosamente ao entrar no painel do contador
 async function carregarBadgeInteresse(){
-  if(S.role !== 'contador' || !S.scriptUrl) return;
+  if(S.role !== 'contador') return;
   try {
     const data = await apiCached('listarInteresses', {});
     const pendentes = (data.interesses || []).filter(i => !i.ativado || i.ativado === 'false' || i.ativado === '');
@@ -4716,7 +4713,7 @@ async function carregarBadgeInteresse(){
 }
  
 function loader(msg='Carregando…'){return `<div class="loader-wrap"><div class="spinner"></div><p style="color:var(--muted);font-size:13px">${msg}</p></div>`;}
-function errMsg(msg){return `<div class="empty"><div class="empty-icon">⚠️</div><h3>Erro de conexão</h3><p>${msg}</p><p style="margin-top:10px;font-size:12px">Verifique se a URL do Apps Script está correta.</p></div>`;}
+function errMsg(msg){return `<div class="empty"><div class="empty-icon">⚠️</div><h3>Erro de conexão</h3><p>${msg}</p><p style="margin-top:10px;font-size:12px">Verifique sua conexão com o banco de dados (Supabase).</p></div>`;}
  
 function exportCSV(){
   if(!S.monthData) return;
@@ -4945,3 +4942,4 @@ async function emitirNota(){
 </script>
 </body>
 </html>
+ 
